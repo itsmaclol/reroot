@@ -476,7 +476,7 @@ def _github_rate_limit_fallback(repo: str, what: str) -> str:
     warn("GitHub API rate limit hit.")
     info("Tip: set GITHUB_TOKEN env var for 5,000 req/hr.")
     print(f"  Paste the direct download URL for the {bold(what)} zip:")
-    info(f"  Find it at: https://github.com/{repo}/releases/latest")
+    info(f"  Find it at: https://github.com/{repo}/releases")
     url = prompt(f"  {cyan('URL>')} ").strip()
     if not url:
         sys.exit(1)
@@ -693,12 +693,15 @@ def resolve_wildkernels(kernel_version_hint: Optional[str],
                 ok(f"Cached: {dim(cached_url.split('/')[-1])}")
                 return cached_url
 
-    api_url = f"https://api.github.com/repos/{WILDKERNELS_REPO}/releases/latest"
+    # Query the full releases list (not /releases/latest) so prereleases are
+    # considered too — WildKernels frequently ships newer kernel versions in
+    # prerelease-tagged builds before promoting them to a stable release.
+    api_url = f"https://api.github.com/repos/{WILDKERNELS_REPO}/releases?per_page=30"
     log.debug(f"Querying WildKernels API: {api_url}")
     info(f"GitHub API: {dim(api_url)}")
 
     try:
-        data = fetch_json(api_url)
+        releases = fetch_json(api_url)
     except urllib.error.HTTPError as e:
         if e.code == 403:
             url = _github_rate_limit_fallback(WILDKERNELS_REPO, "AnyKernel3")
@@ -710,10 +713,20 @@ def resolve_wildkernels(kernel_version_hint: Optional[str],
             return url
         raise
 
+    if not isinstance(releases, list) or not releases:
+        err("No WildKernels releases returned by the GitHub API.")
+        sys.exit(1)
+
+    # GitHub returns releases newest-first; take the most recent published
+    # (non-draft) one, whether or not it is flagged as a prerelease.
+    published = [r for r in releases if not r.get("draft")]
+    data = published[0] if published else releases[0]
+
     _wildkernels_tag = data.get("tag_name", "(unknown)")
     assets           = data.get("assets", [])
-    log.info(f"WildKernels release: {_wildkernels_tag}  ({len(assets)} assets)")
-    ok(f"Release: {bold(_wildkernels_tag)}  {dim(f'{len(assets)} assets')}")
+    _pre_note        = " (prerelease)" if data.get("prerelease") else ""
+    log.info(f"WildKernels release: {_wildkernels_tag}{_pre_note}  ({len(assets)} assets)")
+    ok(f"Release: {bold(_wildkernels_tag)}{dim(_pre_note)}  {dim(f'{len(assets)} assets')}")
 
     parse_manager_info(data.get("body", ""), workdir=WORKDIR, log=log)
 
