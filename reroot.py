@@ -725,8 +725,10 @@ def resolve_wildkernels(kernel_version_hint: Optional[str],
         sys.exit(1)
 
     # GitHub returns releases newest-first; take the most recent published
-    # (non-draft) one, whether or not it is flagged as a prerelease.
-    published = [r for r in releases if not r.get("draft")]
+    # (non-draft) one that ships AnyKernel3 zips, prerelease or not — the
+    # rolling "nightly" tag is often empty.
+    published = [r for r in releases if not r.get("draft")
+                 and any("AnyKernel3" in a["name"] for a in r.get("assets", []))]
     data = published[0] if published else releases[0]
 
     _wildkernels_tag = data.get("tag_name", "(unknown)")
