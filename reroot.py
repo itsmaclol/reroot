@@ -683,12 +683,19 @@ def resolve_wildkernels(kernel_version_hint: Optional[str],
     global _wildkernels_tag
     section_mini("WildKernels AnyKernel3 (KernelSU + SUSFS)")
 
-    # Check URL cache first — avoids GitHub API on repeat runs
+    # Check URL cache first — avoids GitHub API on repeat runs.
+    # Only valid if the cached asset is for the same kernel version: an OTA
+    # can bump the kernel (e.g. 6.6 → 6.12), and a stale URL bricks the device.
     if workdir:
         cache_file = _wk_url_cache_path(workdir)
         if cache_file.exists():
             cached_url = cache_file.read_text().strip()
-            if cached_url:
+            cached_name = cached_url.split("/")[-1]
+            if cached_url and not (kernel_version_hint
+                                   and cached_name.startswith(kernel_version_hint)):
+                log.info(f"Ignoring cached WildKernels URL (kernel mismatch): {cached_name}")
+                info(f"Ignoring stale cache: {dim(cached_name)}")
+            elif cached_url:
                 log.info(f"WildKernels URL from cache: {cached_url}")
                 ok(f"Cached: {dim(cached_url.split('/')[-1])}")
                 return cached_url
@@ -728,7 +735,7 @@ def resolve_wildkernels(kernel_version_hint: Optional[str],
     log.info(f"WildKernels release: {_wildkernels_tag}{_pre_note}  ({len(assets)} assets)")
     ok(f"Release: {bold(_wildkernels_tag)}{dim(_pre_note)}  {dim(f'{len(assets)} assets')}")
 
-    parse_manager_info(data.get("body", ""), workdir=WORKDIR, log=log)
+    parse_manager_info(data.get("body", ""), workdir=str(workdir or WORKDIR), log=log)
 
     kver = kernel_version_hint
     if not kver:
@@ -1884,14 +1891,20 @@ def verify_device(adb_path: str, fastboot_path: str, build_id: str,
     print()
 
     device_codename = values.get("ro.product.device", "")
-    if device_codename and device_codename != DEVICE_CODENAME:
+    fingerprint     = values.get("ro.build.fingerprint", "")
+    if not device_codename or not fingerprint:
+        log.error("Could not read device props (device unauthorized or in recovery?)")
+        err("Could not read device identity — is USB debugging authorized on the phone?")
+        info("Accept the 'Allow USB debugging' prompt on the phone, then re-run.")
+        return None
+
+    if device_codename != DEVICE_CODENAME:
         log.warning(f"Codename mismatch: device={device_codename}  expected={DEVICE_CODENAME}")
         warn(f"Codename mismatch: device is '{device_codename}', expected '{DEVICE_CODENAME}'.")
         if not confirm("Continue anyway?"):
             return None
 
-    fingerprint = values.get("ro.build.fingerprint", "")
-    if build_id and fingerprint and build_id.lower() not in fingerprint.lower():
+    if build_id and build_id.lower() not in fingerprint.lower():
         log.warning(f"Build mismatch: factory={build_id}  fingerprint={fingerprint}")
         print(f"\n  {red('[!] BUILD MISMATCH')}")
         print(f"  {BLT} Factory build : {bold(build_id)}")
@@ -2227,6 +2240,16 @@ def main():
     kernel_image = extract_anykernel_image(ak3_zip, workdir, log)
     ok(f"Kernel Image: {bold(f'{kernel_image.stat().st_size//1024:,} KB')}")
 
+    # Hard gate: the new kernel must be the same version as the stock one,
+    # whatever path (cache, manual URL, prompt) chose the AnyKernel3 zip.
+    new_kver = kernel_version_from_boot_img(kernel_image, log)
+    log.info(f"Kernel version in new Image: {new_kver}  (stock: {kver})")
+    if not kver or new_kver != kver:
+        err(f"Kernel mismatch: stock boot.img is {kver or '(unknown)'}, "
+            f"new Image is {new_kver or '(unknown)'} — refusing to continue.")
+        sys.exit(1)
+    ok(f"Kernel version match: {bold(green(new_kver))}")
+
     if args.magiskboot and pathlib.Path(args.magiskboot).exists():
         magiskboot_bin = pathlib.Path(args.magiskboot)
         log.info(f"Using user-supplied magiskboot: {magiskboot_bin}")
@@ -2257,7 +2280,7 @@ def main():
 
     # Install manager APK if one was downloaded
     apks = list(workdir.glob("*.apk"))
-    if apks:
+    if apks and serial != _FASTBOOT_SERIAL:
         print()
         for apk in apks:
             arrow(f"Manager APK: {bold(apk.name)}")
