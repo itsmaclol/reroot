@@ -45,7 +45,8 @@ from typing import Optional
 DEVICE_CODENAME  = "mustang"   # Your device codename (see list above)
 ANDROID_MAJOR    = "17"        # Android major version (Settings → About → Android version)
 
-# Prompted at runtime if None. Set here to skip the prompt (e.g. "qpr1", "qpr2").
+# Prompted at runtime if None. Set here to skip the prompt:
+#   "" = latest stable, "beta" = base beta, or a beta track like "qpr1", "qpr2".
 BETA_TRACK: Optional[str] = None
 
 # Working directory for all downloads and intermediate files.
@@ -523,12 +524,113 @@ def _resolve_apk_from_repo(repo: str) -> Optional[str]:
 
 # ─── Step 1a: Google factory image ───────────────────────────────────────────
 
-def resolve_factory_image(beta_track: str, log: logging.Logger) -> tuple:
+STABLE_IMAGES_URL = "https://developers.google.com/android/images"
+# Cookie set by the "Acknowledge" button on the stable images page — without it
+# the page is served with the factory links stripped out.
+STABLE_IMAGES_COOKIE = "devsite_wall_acks=nexus-image-tos"
+
+
+def _factory_build_id(url: str) -> str:
+    """Build ID from a stable (codename-BUILD-factory) or beta
+    (codename_beta-BUILD-factory) factory ZIP URL."""
+    m = re.search(
+        rf"{re.escape(DEVICE_CODENAME)}(?:_beta)?-([^/]+?)-factory-",
+        url, re.IGNORECASE)
+    return m.group(1) if m else "(unknown)"
+
+
+def adb_build_id() -> Optional[str]:
+    try:
+        r = subprocess.run(["adb", "shell", "getprop ro.build.id"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _confirm_factory(chosen_url: str, log: logging.Logger) -> tuple:
+    build_id = _factory_build_id(chosen_url)
+
+    while True:
+        print(f"\n  {BLT} URL   : {dim(chosen_url)}")
+        print(f"  {BLT} Build : {bold(green(build_id))}")
+        if confirm(f"Factory build {green(build_id)} for {cyan(DEVICE_CODENAME)} — correct?"):
+            break
+        override = prompt(f"  {cyan('URL>')} ")
+        if not override:
+            sys.exit(1)
+        chosen_url = override
+        build_id   = _factory_build_id(chosen_url)
+
+    log.info(f"Factory URL resolved: build={build_id}")
+    ok(f"Factory build: {bold(green(build_id))}")
+    return chosen_url, build_id
+
+
+def resolve_stable_factory_image(log: logging.Logger) -> tuple:
+    log.debug(f"Fetching stable factory image page: {STABLE_IMAGES_URL}")
+    info(f"Scraping: {dim(STABLE_IMAGES_URL)}")
+
+    html = ""
+    try:
+        html = fetch_text(STABLE_IMAGES_URL,
+                          headers={**_dl_headers(), "Cookie": STABLE_IMAGES_COOKIE})
+        log.debug(f"Page fetched: {len(html):,} bytes")
+    except Exception as e:
+        log.warning(f"Could not fetch stable factory page: {e}")
+        warn(f"Could not fetch page: {e}")
+
+    # Rows are listed oldest → newest:
+    #   <tr id="mustangcp3a.260905.009">
+    #     <td>17.0.0 (CP3A.260905.009, Sep 2026)</td> ... href="...mustang-cp3a...-factory-xxxx.zip"
+    row_re = re.compile(
+        rf'<tr id="{re.escape(DEVICE_CODENAME)}[^"]*">\s*<td>([^<]+)</td>'
+        r'(?:(?!</tr>).)*?'
+        rf'href="(https://dl\.google\.com/dl/android/aosp/{re.escape(DEVICE_CODENAME)}-'
+        r'[^"]+-factory-[0-9a-fA-F]+\.zip)"',
+        re.IGNORECASE | re.DOTALL)
+    rows = [(label.strip(), url) for label, url in row_re.findall(html)]
+    log.debug(f"Stable factory rows found: {len(rows)}")
+
+    if not rows:
+        warn("No stable factory ZIP found for this device.")
+        print(f"\n  {yellow('Manual override')} — paste the factory zip URL:")
+        override = prompt(f"  {cyan('URL>')} ")
+        if not override:
+            sys.exit(1)
+        return _confirm_factory(override, log)
+
+    # Carrier-specific builds carry a third field: "(CP2A.260705.006.A1, Jul 2026, Rogers)"
+    generic = [r for r in rows if r[0].count(",") < 2] or rows
+    label, chosen_url = generic[-1]
+
+    device_build = adb_build_id()
+    if device_build:
+        log.info(f"Device build (adb): {device_build}")
+        installed = [r for r in rows
+                     if _factory_build_id(r[1]).lower() == device_build.lower()]
+        if installed:
+            label, chosen_url = installed[-1]
+            ok(f"Matches build installed on the phone: {bold(device_build)}")
+        else:
+            warn(f"Phone reports build {device_build}, which isn't on the stable page.")
+            info("boot.img must match the installed build — update the phone first "
+                 "or paste the matching factory URL.")
+
+    print(f"\n  {BLT} Release : {bold(label)}")
+    return _confirm_factory(chosen_url, log)
+
+
+def resolve_factory_image(track: str, log: logging.Logger) -> tuple:
+    """track: '' → latest stable, 'beta' → base beta, anything else → that beta track."""
     section_mini("Google Factory Image")
+
+    if not track:
+        return resolve_stable_factory_image(log)
 
     page_url = (
         f"https://developer.android.com/about/versions/{ANDROID_MAJOR}/"
-        + (f"{beta_track}/download" if beta_track else "download")
+        + ("download" if track.lower() == "beta" else f"{track}/download")
     )
     log.debug(f"Fetching factory image page: {page_url}")
     info(f"Scraping: {dim(page_url)}")
@@ -573,28 +675,7 @@ def resolve_factory_image(beta_track: str, log: logging.Logger) -> tuple:
     else:
         chosen_url = matches[0]
 
-    def _extract_build(url: str) -> str:
-        m = re.search(
-            rf"{re.escape(DEVICE_CODENAME)}_beta-([^-]+(?:\.[^-]+)*)-factory-",
-            url, re.IGNORECASE)
-        return m.group(1) if m else "(unknown)"
-
-    build_id = _extract_build(chosen_url)
-
-    while True:
-        print(f"\n  {BLT} URL   : {dim(chosen_url)}")
-        print(f"  {BLT} Build : {bold(green(build_id))}")
-        if confirm(f"Factory build {green(build_id)} for {cyan(DEVICE_CODENAME)} — correct?"):
-            break
-        override = prompt(f"  {cyan('URL>')} ")
-        if not override:
-            sys.exit(1)
-        chosen_url = override
-        build_id   = _extract_build(chosen_url)
-
-    log.info(f"Factory URL resolved: build={build_id}")
-    ok(f"Factory build: {bold(green(build_id))}")
-    return chosen_url, build_id
+    return _confirm_factory(chosen_url, log)
 
 # ─── Manager APK parser ───────────────────────────────────────────────────────
 
@@ -2180,7 +2261,7 @@ def main():
     if BETA_TRACK is None:
         print()
         BETA_TRACK = prompt(
-            f"  {cyan('Beta track')} (e.g. qpr1, qpr2 — or Enter for base): ")
+            f"  {cyan('Release')} (Enter for latest stable — or beta, qpr1, qpr2): ")
 
     log.info(f"device={DEVICE_CODENAME}  android={ANDROID_MAJOR}  track='{BETA_TRACK}'")
 
