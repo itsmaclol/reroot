@@ -24,7 +24,7 @@ All configurable variables are at the top of `resolvers.py`:
 ```python
 DEVICE_CODENAME  = "cheetah"    # Pixel 7 Pro. Change for other devices.
 ANDROID_MAJOR    = "17"         # Android major version (not the GKI branch).
-BETA_TRACK       = None         # Set to "qpr1", "qpr2", etc., or None to prompt.
+BETA_TRACK       = None         # "" = latest stable, "beta", "qpr1", "qpr2", or None to prompt.
 WORKDIR          = "./reroot_work"
 
 WILDKERNELS_REPO = "WildKernels/GKI_KernelSU_SUSFS"
@@ -72,7 +72,7 @@ python reroot.py --magiskboot .\magiskboot.exe  # skip auto-download
 
 ### Pipeline steps
 
-1. **Resolve** — scrapes the Google download page for the factory ZIP URL; queries GitHub API for WildKernels and magiskboot releases
+1. **Resolve** — scrapes the Google factory images page (latest stable by default, or the beta page for `beta`/`qprN`) for the factory ZIP URL; queries GitHub API for WildKernels and magiskboot releases
 2. **Download** — downloads all three artifacts with progress bar and resume support; skips if a valid cached file already exists
 3. **Extract** — unpacks the factory ZIP (zip-in-zip), locates `boot.img` (aborts if not found rather than silently substituting `init_boot.img` or `vendor_boot.img`), extracts the `Image` from AnyKernel3
 4. **Repack** — `magiskboot unpack` → swap `kernel` with `Image` → `magiskboot repack` → sanity-check size
